@@ -27,7 +27,7 @@
 # <http://www.gnu.org/licenses/>.
 
 from __future__ import absolute_import
-from ldap import explode_dn
+from ldap.dn import dn2str, str2dn
 import univention.admin.objects
 import univention.admin.modules
 import univention.admin.uexceptions
@@ -166,17 +166,19 @@ class UdmObject(object):
 		self._copy_to_udm_obj()
 		if self.dn:
 			if self._old_position and self._old_position != self.position:
-				new_dn = '{},{}'.format(explode_dn(self._udm_object.dn, 0)[0], self.position)
+				new_dn_li = [str2dn(self._udm_object.dn)[0]]
+				new_dn_li.extend(str2dn(self.position))
+				new_dn = dn2str(new_dn_li)
 				self.dn = self._udm_object.move(new_dn)
 				assert self.dn == self._udm_object.dn
-				self.position = ','.join(explode_dn(self.dn, 0)[1:])
+				self.position = self._lo.parentDn(self.dn)
 				self._old_position = self.position
 				self._udm_object.position.setDn(self.position)
 			self.dn = self._udm_object.modify()
 		else:
 			self.dn = self._udm_object.create()
 		assert self.dn == self._udm_object.dn
-		assert self.position == ','.join(explode_dn(self.dn, 0)[1:])
+		assert self.position == self._lo.parentDn(self.dn)
 		self._fresh = False
 		return self
 
@@ -189,7 +191,8 @@ class UdmObject(object):
 		if not self.dn or not self._udm_object:
 			raise FirstUseError()
 		self._udm_object.remove()
-		univention.admin.objects.performCleanup(self._udm_object)#
+		if univention.admin.objects.wantsCleanup(self._udm_object):
+			univention.admin.objects.performCleanup(self._udm_object)
 		# prevent further use of object
 		self._udm_object = self.save = self.delete = self.reload = None
 
@@ -209,11 +212,9 @@ class UdmObject(object):
 		"""
 		udm_module = cls._get_udm_module(module_name, lo)
 		try:
-			udm_module_lookup_filter = str(udm_module.lookup_filter(filter_s))
+			udm_module_lookup_filter = str(udm_module.lookup_filter(filter_s, lo))
 		except AttributeError:
-			# 'module' object has no attribute 'lookup_filter'
-			# happens with incomplete modules like 'computers/computer'
-			# TODO: log warning
+			# not all modules have 'lookup_filter'
 			udm_module_lookup_filter = filter_s
 		res = lo.search(filter=udm_module_lookup_filter, base=base, scope=scope, attr=['dn'])
 		return [UdmObject(module_name, lo, dn) for dn, attr in res]
@@ -227,7 +228,7 @@ class UdmObject(object):
 		self.options = self._udm_object.options
 		self.policies = self._udm_object.policies
 		if self.dn:
-			self.position = ','.join(explode_dn(self.dn, 0)[1:])
+			self.position = self._lo.parentDn(self.dn)
 			self._old_position = self.position
 		else:
 			self.position = self._udm_object.position.getDn()
@@ -244,7 +245,8 @@ class UdmObject(object):
 		self._udm_object.policies = self.policies
 		self._udm_object.position.setDn(self.position)
 		for k, v in self._udm_object.items():
-			self._udm_object[k] = getattr(self.attr, k, None)
+			if v != getattr(self.attr, k, None):
+				self._udm_object[k] = getattr(self.attr, k, None)
 
 	@classmethod
 	def _get_udm_module(cls, module_name, lo):
@@ -257,7 +259,8 @@ class UdmObject(object):
 		"""
 		key = (lo.base, lo.binddn, lo.host, module_name)
 		if key not in cls._udm_module_cache:
-			univention.admin.modules.update()
+			if module_name not in [key[3] for key in cls._udm_module_cache.keys()]:
+				univention.admin.modules.update()
 			udm_module = univention.admin.modules.get(module_name)
 			po = univention.admin.uldap.position(lo.base)
 			univention.admin.modules.init(lo, po, udm_module)
@@ -283,6 +286,7 @@ class UdmObject(object):
 		uni_obj_type = getattr(obj, 'oldattr', {}).get('univentionObjectType')
 		if uni_obj_type and self.module_name not in uni_obj_type:
 			raise WrongObjectType(dn=dn, module_name=self.module_name)
+		obj.open()
 		return obj
 
 
@@ -367,7 +371,8 @@ class UdmHandler(object):
 		"""
 		obj = self.get(dn)
 		obj.remove()
-		univention.admin.objects.performCleanup(obj)
+		if univention.admin.objects.wantsCleanup(obj):
+			univention.admin.objects.performCleanup(obj)
 
 	def get_udm_module(self):  # type: () -> univention.admin.handlers.simpleLdap
 		"""
